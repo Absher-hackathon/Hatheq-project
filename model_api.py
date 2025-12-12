@@ -32,7 +32,7 @@ except Exception as e:
     model = None
 
 def preprocess_image(image_data):
-    """Preprocess image for model input"""
+    """Preprocess image for model input - optimized version"""
     # Decode base64 image
     if isinstance(image_data, str):
         # Remove data URL prefix if present
@@ -49,12 +49,12 @@ def preprocess_image(image_data):
     if image.mode != 'RGB':
         image = image.convert('RGB')
     
-    # Convert to numpy array
-    img_array = np.array(image)
+    # Resize to model input size using PIL (faster than doing it after conversion)
+    # Use NEAREST for fastest processing (acceptable quality for small 224x224 images)
+    image = image.resize((IMG_SIZE, IMG_SIZE), Image.Resampling.NEAREST)
     
-    # Resize to model input size using PIL (avoids cv2 NumPy compatibility issues)
-    image = image.resize((IMG_SIZE, IMG_SIZE), Image.Resampling.LANCZOS)
-    img_array = np.array(image)
+    # Convert to numpy array
+    img_array = np.array(image, dtype=np.float32)
     
     # Preprocess using ResNet preprocessing
     img_array = tf.keras.applications.resnet.preprocess_input(img_array)
@@ -87,8 +87,9 @@ def predict():
         # Preprocess image
         input_tensor = preprocess_image(data['image'])
         
-        # Get predictions
-        predictions = model.predict(input_tensor, verbose=0)
+        # Get predictions with optimized settings
+        # Use smaller batch size and disable verbose for faster inference
+        predictions = model.predict(input_tensor, verbose=0, batch_size=1)
         expr_probs = predictions[0][0]  # Expression probabilities
         auth_probs = predictions[1][0]   # Authenticity probabilities
         

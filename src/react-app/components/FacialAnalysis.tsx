@@ -134,35 +134,58 @@ export default function FacialAnalysis({ videoRef, onAnalysisData }: FacialAnaly
     try {
       // Check if using API model
       if ('api' in tfModel && (tfModel as ApiModel).api) {
-        // Convert canvas to base64 image
-        const imageData = frame.toDataURL('image/jpeg', 0.8);
+        // Create smaller canvas for faster encoding and transfer
+        const smallCanvas = document.createElement('canvas');
+        smallCanvas.width = IMG_SIZE;
+        smallCanvas.height = IMG_SIZE;
+        const smallCtx = smallCanvas.getContext('2d');
+        if (!smallCtx) return null;
         
-        // Send to Python API
+        // Draw resized image to small canvas
+        smallCtx.drawImage(frame, 0, 0, IMG_SIZE, IMG_SIZE);
+        
+        // Convert to base64 with very low quality for fastest transfer
+        const imageData = smallCanvas.toDataURL('image/jpeg', 0.4);
+        
+        // Send to Python API with shorter timeout
         const apiPort = import.meta.env.VITE_MODEL_API_PORT || '5001';
-        const response = await fetch(`http://localhost:${apiPort}/predict`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ image: imageData })
-        });
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 3000); // 3 second timeout
         
-        if (!response.ok) {
-          throw new Error(`API error: ${response.statusText}`);
-        }
+        try {
+          const response = await fetch(`http://localhost:${apiPort}/predict`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ image: imageData }),
+            signal: controller.signal
+          });
+          clearTimeout(timeoutId);
         
-        const result = await response.json();
-        
-        return {
-          expression: {
-            expression: result.expression.label,
-            probabilities: result.expression.probabilities
-          },
-          authenticity: {
-            authenticity: result.authenticity.label,
-            probabilities: result.authenticity.probabilities
+          if (!response.ok) {
+            throw new Error(`API error: ${response.statusText}`);
           }
-        };
+          
+          const result = await response.json();
+          
+          return {
+            expression: {
+              expression: result.expression.label,
+              probabilities: result.expression.probabilities
+            },
+            authenticity: {
+              authenticity: result.authenticity.label,
+              probabilities: result.authenticity.probabilities
+            }
+          };
+        } catch (error) {
+          clearTimeout(timeoutId);
+          if (error instanceof Error && error.name === 'AbortError') {
+            console.warn('Prediction request timed out');
+          }
+          throw error;
+        }
       } else {
         // Fallback to TensorFlow.js (if model was converted)
         const tempCanvas = document.createElement('canvas');
@@ -234,31 +257,57 @@ export default function FacialAnalysis({ videoRef, onAnalysisData }: FacialAnaly
     if (!analysisCtx) return;
 
     let frameCount = 0;
+    let lastPredictionTime = 0;
+    let pendingPrediction: Promise<{ expression: { expression: string; probabilities: { [key: string]: number } }; authenticity: { authenticity: string; probabilities: { [key: string]: number } } } | null> | null = null;
+    let lastExpressionPrediction: { expression: string; probabilities: { [key: string]: number } } | undefined;
+    let lastAuthenticityPrediction: { authenticity: string; probabilities: { [key: string]: number } } | undefined;
+    const PREDICTION_INTERVAL = 60; // Run prediction every 60 frames (~2 seconds at 30fps)
+    const MIN_PREDICTION_INTERVAL_MS = 2000; // Minimum 2 seconds between predictions
 
     const analyze = async () => {
       if (video.readyState === video.HAVE_ENOUGH_DATA) {
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        analysisCanvas.width = video.videoWidth;
-        analysisCanvas.height = video.videoHeight;
+        // Only resize canvas when dimensions change
+        if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          analysisCanvas.width = video.videoWidth;
+          analysisCanvas.height = video.videoHeight;
+        }
 
         const startTimeMs = performance.now();
         const results = faceLandmarker.detectForVideo(video, startTimeMs);
 
         // Clear canvas
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-        analysisCtx.drawImage(video, 0, 0, analysisCanvas.width, analysisCanvas.height);
+        
+        // Use cached predictions by default
+        const expressionPrediction = lastExpressionPrediction;
+        const authenticityPrediction = lastAuthenticityPrediction;
 
-        let expressionPrediction: { expression: string; probabilities: { [key: string]: number } } | undefined;
-        let authenticityPrediction: { authenticity: string; probabilities: { [key: string]: number } } | undefined;
-
-        // Run TensorFlow model prediction every 10 frames (to reduce computation)
-        if (tfModel && frameCount % 10 === 0) {
-          const tfResults = await predictWithTensorFlowModel(analysisCanvas);
-          if (tfResults) {
-            expressionPrediction = tfResults.expression;
-            authenticityPrediction = tfResults.authenticity;
-          }
+        // Run TensorFlow model prediction very infrequently and only if face is detected
+        const now = Date.now();
+        const hasFace = results.faceLandmarks && results.faceLandmarks.length > 0;
+        
+        if (tfModel && hasFace && frameCount % PREDICTION_INTERVAL === 0 && 
+            (now - lastPredictionTime) >= MIN_PREDICTION_INTERVAL_MS && 
+            !pendingPrediction) {
+          // Only draw to analysis canvas when we need to predict
+          analysisCtx.drawImage(video, 0, 0, analysisCanvas.width, analysisCanvas.height);
+          
+          lastPredictionTime = now;
+          // Make prediction non-blocking - don't await it
+          pendingPrediction = predictWithTensorFlowModel(analysisCanvas).then(tfResults => {
+            if (tfResults) {
+              lastExpressionPrediction = tfResults.expression;
+              lastAuthenticityPrediction = tfResults.authenticity;
+            }
+            pendingPrediction = null;
+            return tfResults;
+          }).catch(err => {
+            console.warn('Prediction error:', err);
+            pendingPrediction = null;
+            return null;
+          });
         }
         frameCount++;
 

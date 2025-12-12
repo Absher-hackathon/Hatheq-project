@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router';
-import { ArrowLeft, Camera, FileText, AlertCircle, Eye, Brain, Activity } from 'lucide-react';
+import { ArrowLeft, Camera, FileText, AlertCircle, Eye, Brain, Activity, Smile, Shield, TrendingUp, AlertTriangle } from 'lucide-react';
 import FacialAnalysis from '@/react-app/components/FacialAnalysis';
 import QuestionPanel from '@/react-app/components/QuestionPanel';
 import AnalysisReport from '@/react-app/components/AnalysisReport';
@@ -29,6 +29,14 @@ export default function SessionPage() {
   const [cameraActive, setCameraActive] = useState(false);
   const [showReport, setShowReport] = useState(false);
   const [activeTab, setActiveTab] = useState<'questions' | 'analysis'>('questions');
+  const [latestAnalysis, setLatestAnalysis] = useState<{
+    eyeData: { leftEyeBlink: number; rightEyeBlink: number; eyeLookDown: number; eyeLookUp: number };
+    expressionData: { mouthSmile: number; mouthFrown: number; browFurrow: number; jawOpen: number };
+    stressScore: number;
+    expressionPrediction?: { expression: string; probabilities: { [key: string]: number } };
+    authenticityPrediction?: { authenticity: string; probabilities: { [key: string]: number } };
+    timestamp: string;
+  } | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -150,7 +158,6 @@ export default function SessionPage() {
       const blob = new Blob(recordedChunksRef.current, { type: 'video/webm' });
       const timestamp = Date.now();
       const videoFilename = `session-${id}-${timestamp}.webm`;
-      const analysisFilename = `session-${id}-${timestamp}-analysis.json`;
       const fileSizeMB = (blob.size / 1024 / 1024).toFixed(2);
       
       // Calculate averages and get last predictions for expression and authenticity
@@ -211,25 +218,74 @@ export default function SessionPage() {
         };
       }
       
-      // Prepare analysis results - only include summary, not all frames
+      // Calculate metrics
+      const avgStress = analysisDataRef.current.length > 0
+        ? analysisDataRef.current.reduce((sum, d) => sum + d.stressScore, 0) / analysisDataRef.current.length
+        : 0;
+      const maxStress = analysisDataRef.current.length > 0
+        ? Math.max(...analysisDataRef.current.map(d => d.stressScore))
+        : 0;
+      
+      // Calculate final credibility score (0-100)
+      // Higher score = more credible
+      // Factors: low stress (good), high genuineness (good), neutral/positive expressions (good)
+      let credibilityScore = 100;
+      
+      // Stress penalty (0-40 points)
+      credibilityScore -= (avgStress * 40);
+      
+      // Authenticity factor (0-30 points)
+      if (averageAuthenticity) {
+        const genuineness = averageAuthenticity.probabilities.Genuine || 0;
+        credibilityScore -= ((1 - genuineness) * 30);
+      }
+      
+      // Expression factor (0-30 points)
+      if (averageExpression) {
+        const negativeExpressions = ['Angry', 'Disgust', 'Fear', 'Sad'];
+        const isNegative = negativeExpressions.includes(averageExpression.expression);
+        if (isNegative) {
+          const negativeProb = averageExpression.probabilities[averageExpression.expression] || 0;
+          credibilityScore -= (negativeProb * 30);
+        }
+      }
+      
+      // Ensure score is between 0-100
+      credibilityScore = Math.max(0, Math.min(100, credibilityScore));
+      
+      // Determine status
+      let status = 'high';
+      let statusAr = 'عالية';
+      if (credibilityScore < 40) {
+        status = 'low';
+        statusAr = 'منخفضة';
+      } else if (credibilityScore < 70) {
+        status = 'medium';
+        statusAr = 'متوسطة';
+      }
+      
+      // Simplified analysis results with final aggregated score
       const analysisResults = {
+        // Simplified summary with final result
+        finalResult: {
+          credibilityScore: Math.round(credibilityScore),
+          status: status,
+          statusAr: statusAr,
+          summary: `مصداقية ${statusAr} (${Math.round(credibilityScore)}/100)`
+        },
+        // Basic info
         sessionId: id,
         sessionName: session?.suspect_name || 'Unknown',
         recordingDate: new Date().toISOString(),
-        videoFile: videoFilename,
         totalFrames: analysisDataRef.current.length,
+        // Detailed metrics (for backward compatibility)
         summary: {
-          averageStressScore: analysisDataRef.current.length > 0
-            ? analysisDataRef.current.reduce((sum, d) => sum + d.stressScore, 0) / analysisDataRef.current.length
-            : 0,
-          maxStressScore: analysisDataRef.current.length > 0
-            ? Math.max(...analysisDataRef.current.map(d => d.stressScore))
-            : 0,
+          averageStressScore: avgStress,
+          maxStressScore: maxStress,
           minStressScore: analysisDataRef.current.length > 0
             ? Math.min(...analysisDataRef.current.map(d => d.stressScore))
             : 0,
         },
-        // Include only last and average predictions for expression and authenticity
         expression: {
           last: lastExpression,
           average: averageExpression
@@ -240,9 +296,11 @@ export default function SessionPage() {
         }
       };
 
-      const analysisBlob = new Blob([JSON.stringify(analysisResults, null, 2)], { type: 'application/json' });
+      // Convert analysis results to JSON string for API
+      const analysisJsonString = JSON.stringify(analysisResults, null, 2);
+      const analysisBlob = new Blob([analysisJsonString], { type: 'application/json' });
       
-      // Save video file
+      // Save video file only (no JSON file download)
       if ('showSaveFilePicker' in window) {
         try {
           // Save video
@@ -259,40 +317,25 @@ export default function SessionPage() {
           await videoWritable.write(blob);
           await videoWritable.close();
           
-          // Save analysis JSON
-          // @ts-expect-error - File System Access API
-          const analysisHandle = await window.showSaveFilePicker({
-            suggestedName: analysisFilename,
-            types: [{
-              description: 'JSON Analysis Data',
-              accept: { 'application/json': ['.json'] }
-            }]
-          });
-          
-          const analysisWritable = await analysisHandle.createWritable();
-          await analysisWritable.write(analysisBlob);
-          await analysisWritable.close();
-          
           console.log(`Video saved: ${videoHandle.name} (${fileSizeMB} MB)`);
-          console.log(`Analysis saved: ${analysisHandle.name}`);
-          alert(`تم حفظ الفيديو والتحليل بنجاح!\n\nالفيديو: ${videoHandle.name}\nالتحليل: ${analysisHandle.name}\nالحجم: ${fileSizeMB} MB\n\nإجمالي إطارات التحليل: ${analysisDataRef.current.length}`);
+          alert(`تم حفظ الفيديو بنجاح!\n\nالفيديو: ${videoHandle.name}\nالحجم: ${fileSizeMB} MB\n\nإجمالي إطارات التحليل: ${analysisDataRef.current.length}\n\nسيتم حفظ بيانات التحليل تلقائياً في التقرير`);
         } catch (fsError: unknown) {
           // User cancelled or error, fall back to download
           const error = fsError as { name?: string };
           if (error.name !== 'AbortError') {
             console.warn('File System Access API failed, using download:', fsError);
-            saveAsDownload(blob, videoFilename, fileSizeMB, analysisBlob, analysisFilename);
+            saveAsDownload(blob, videoFilename, fileSizeMB);
           }
         }
       } else {
         // Fallback to download for browsers without File System Access API
-        saveAsDownload(blob, videoFilename, fileSizeMB, analysisBlob, analysisFilename);
+        saveAsDownload(blob, videoFilename, fileSizeMB);
       }
 
-      // Also save metadata via API
+      // Save analysis data to API (for display in AnalysisReport)
       const formData = new FormData();
       formData.append('video', blob, videoFilename);
-      formData.append('analysis', analysisBlob, analysisFilename);
+      formData.append('analysis', analysisBlob, `analysis.json`); // Use simple name, not downloaded
 
       try {
         const response = await fetch(`/api/sessions/${id}/video`, {
@@ -302,10 +345,10 @@ export default function SessionPage() {
 
         if (response.ok) {
           const result = await response.json();
-          console.log('Video and analysis metadata saved:', result);
+          console.log('Video and analysis data saved to API:', result);
         }
       } catch (apiError) {
-        console.warn('Failed to save video metadata:', apiError);
+        console.warn('Failed to save video and analysis data:', apiError);
       }
     } catch (error) {
       console.error('Error saving video:', error);
@@ -316,8 +359,8 @@ export default function SessionPage() {
     }
   };
 
-  const saveAsDownload = (videoBlob: Blob, videoFilename: string, fileSizeMB: string, analysisBlob?: Blob, analysisFilename?: string) => {
-    // Download video
+  const saveAsDownload = (videoBlob: Blob, videoFilename: string, fileSizeMB: string) => {
+    // Download video only (no JSON file)
     const videoUrl = URL.createObjectURL(videoBlob);
     const videoLink = document.createElement('a');
     videoLink.href = videoUrl;
@@ -327,25 +370,8 @@ export default function SessionPage() {
     document.body.removeChild(videoLink);
     URL.revokeObjectURL(videoUrl);
     
-    // Download analysis if provided
-    if (analysisBlob && analysisFilename) {
-      setTimeout(() => {
-        const analysisUrl = URL.createObjectURL(analysisBlob);
-        const analysisLink = document.createElement('a');
-        analysisLink.href = analysisUrl;
-        analysisLink.download = analysisFilename;
-        document.body.appendChild(analysisLink);
-        analysisLink.click();
-        document.body.removeChild(analysisLink);
-        URL.revokeObjectURL(analysisUrl);
-      }, 500); // Small delay to avoid browser blocking multiple downloads
-    }
-    
     console.log(`Video downloaded: ${videoFilename} (${fileSizeMB} MB)`);
-    if (analysisFilename) {
-      console.log(`Analysis downloaded: ${analysisFilename}`);
-    }
-    alert(`تم حفظ الفيديو والتحليل بنجاح!\n\nالفيديو: ${videoFilename}\n${analysisFilename ? `التحليل: ${analysisFilename}\n` : ''}الحجم: ${fileSizeMB} MB\n\nسيتم حفظهما في مجلد التنزيلات`);
+    alert(`تم حفظ الفيديو بنجاح!\n\nالفيديو: ${videoFilename}\nالحجم: ${fileSizeMB} MB\n\nسيتم حفظ بيانات التحليل تلقائياً في التقرير`);
   };
 
   const stopCamera = async () => {
@@ -470,14 +496,16 @@ export default function SessionPage() {
                   className={`w-full h-full object-cover ${cameraActive ? '' : 'hidden'}`}
                 />
                 {cameraActive && <FacialAnalysis videoRef={videoRef} onAnalysisData={(data) => {
-                  analysisDataRef.current.push({
+                  const analysisEntry = {
                     timestamp: new Date().toISOString(),
                     eyeData: data.eyeData,
                     expressionData: data.expressionData,
                     stressScore: data.stressScore,
                     expressionPrediction: data.expressionPrediction,
                     authenticityPrediction: data.authenticityPrediction
-                  });
+                  };
+                  analysisDataRef.current.push(analysisEntry);
+                  setLatestAnalysis(analysisEntry);
                 }} />}
                 {!cameraActive && (
                   <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-500">
@@ -554,11 +582,182 @@ export default function SessionPage() {
                   />
                 ) : (
                   <div className="space-y-4">
-                    <div className="text-center py-8 text-slate-400">
-                      <AlertCircle className="w-12 h-12 mx-auto mb-3 opacity-50" />
-                      <p className="text-sm">التحليل الفوري سيظهر هنا</p>
-                      <p className="text-xs mt-1">خلال جلسة التحقيق النشطة</p>
-                    </div>
+                    {!cameraActive ? (
+                      <div className="text-center py-8 text-slate-400">
+                        <AlertCircle className="w-12 h-12 mx-auto mb-3 opacity-50" />
+                        <p className="text-sm">الكاميرا غير نشطة</p>
+                        <p className="text-xs mt-1">قم بتشغيل الكاميرا لبدء التحليل الفوري</p>
+                      </div>
+                    ) : !latestAnalysis ? (
+                      <div className="text-center py-8 text-slate-400">
+                        <div className="animate-pulse">
+                          <Activity className="w-12 h-12 mx-auto mb-3 opacity-50" />
+                          <p className="text-sm">جاري تحميل النموذج...</p>
+                          <p className="text-xs mt-1">سيبدأ التحليل قريباً</p>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="space-y-4">
+                        {/* Stress Score */}
+                        <div className="bg-gradient-to-br from-red-600/20 to-orange-600/20 border border-red-500/30 rounded-xl p-4">
+                          <div className="flex items-center justify-between mb-3">
+                            <div className="flex items-center gap-2">
+                              <Activity className="w-5 h-5 text-red-400" />
+                              <h3 className="text-lg font-bold">مؤشر التوتر</h3>
+                            </div>
+                            <span className={`text-2xl font-bold ${
+                              latestAnalysis.stressScore > 0.7 ? 'text-red-400' :
+                              latestAnalysis.stressScore > 0.4 ? 'text-yellow-400' :
+                              'text-green-400'
+                            }`}>
+                              {(latestAnalysis.stressScore * 100).toFixed(1)}%
+                            </span>
+                          </div>
+                          <div className="w-full h-2 bg-slate-700 rounded-full overflow-hidden">
+                            <div 
+                              className={`h-full transition-all duration-1000 ease-out ${
+                                latestAnalysis.stressScore > 0.7 ? 'bg-gradient-to-r from-red-500 to-red-600' :
+                                latestAnalysis.stressScore > 0.4 ? 'bg-gradient-to-r from-yellow-500 to-orange-500' :
+                                'bg-gradient-to-r from-green-500 to-green-600'
+                              }`}
+                              style={{ width: `${latestAnalysis.stressScore * 100}%` }}
+                            />
+                          </div>
+                        </div>
+
+                        {/* Expression Analysis */}
+                        {latestAnalysis.expressionPrediction && (
+                          <div className="bg-white/5 rounded-xl p-4">
+                            <div className="flex items-center gap-2 mb-3">
+                              <Smile className="w-5 h-5 text-purple-400" />
+                              <h3 className="text-lg font-bold">التعبير الحالي</h3>
+                            </div>
+                            <div className="space-y-2">
+                              <div className="flex items-center justify-between">
+                                <span className="text-slate-400">التعبير السائد:</span>
+                                <span className="text-lg font-bold text-purple-400">
+                                  {latestAnalysis.expressionPrediction.expression === 'Angry' ? 'غاضب' :
+                                   latestAnalysis.expressionPrediction.expression === 'Disgust' ? 'اشمئزاز' :
+                                   latestAnalysis.expressionPrediction.expression === 'Fear' ? 'خوف' :
+                                   latestAnalysis.expressionPrediction.expression === 'Happy' ? 'سعيد' :
+                                   latestAnalysis.expressionPrediction.expression === 'Neutral' ? 'محايد' :
+                                   latestAnalysis.expressionPrediction.expression === 'Sad' ? 'حزين' :
+                                   latestAnalysis.expressionPrediction.expression === 'Surprise' ? 'مفاجأة' :
+                                   latestAnalysis.expressionPrediction.expression}
+                                </span>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-slate-400">مستوى الثقة:</span>
+                                <span className="text-white font-semibold">
+                                  {(latestAnalysis.expressionPrediction.probabilities[latestAnalysis.expressionPrediction.expression] * 100).toFixed(1)}%
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Authenticity Analysis */}
+                        {latestAnalysis.authenticityPrediction && (
+                          <div className="bg-white/5 rounded-xl p-4">
+                            <div className="flex items-center gap-2 mb-3">
+                              <Shield className={`w-5 h-5 ${
+                                latestAnalysis.authenticityPrediction.authenticity === 'Genuine' 
+                                  ? 'text-green-400' 
+                                  : 'text-red-400'
+                              }`} />
+                              <h3 className="text-lg font-bold">المصداقية</h3>
+                            </div>
+                            <div className="space-y-2">
+                              <div className="flex items-center justify-between">
+                                <span className="text-slate-400">التقييم:</span>
+                                <span className={`text-lg font-bold ${
+                                  latestAnalysis.authenticityPrediction.authenticity === 'Genuine' 
+                                    ? 'text-green-400' 
+                                    : 'text-red-400'
+                                }`}>
+                                  {latestAnalysis.authenticityPrediction.authenticity === 'Genuine' ? 'أصيل' : 'مزيف'}
+                                </span>
+                              </div>
+                              <div className="grid grid-cols-2 gap-2 text-sm">
+                                <div className="flex items-center justify-between p-2 bg-white/5 rounded">
+                                  <span className="text-slate-400">أصيل:</span>
+                                  <span className="text-green-400 font-semibold">
+                                    {(latestAnalysis.authenticityPrediction.probabilities.Genuine * 100).toFixed(1)}%
+                                  </span>
+                                </div>
+                                <div className="flex items-center justify-between p-2 bg-white/5 rounded">
+                                  <span className="text-slate-400">مزيف:</span>
+                                  <span className="text-red-400 font-semibold">
+                                    {(latestAnalysis.authenticityPrediction.probabilities.Fake * 100).toFixed(1)}%
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Eye Movement */}
+                        <div className="bg-white/5 rounded-xl p-4">
+                          <div className="flex items-center gap-2 mb-3">
+                            <Eye className="w-5 h-5 text-cyan-400" />
+                            <h3 className="text-lg font-bold">حركة العين</h3>
+                          </div>
+                          <div className="grid grid-cols-2 gap-3 text-sm">
+                            <div className="space-y-1">
+                              <div className="text-slate-400 text-xs">رمش العين</div>
+                              <div className="text-white font-semibold">
+                                {((latestAnalysis.eyeData.leftEyeBlink + latestAnalysis.eyeData.rightEyeBlink) / 2 * 100).toFixed(1)}%
+                              </div>
+                            </div>
+                            <div className="space-y-1">
+                              <div className="text-slate-400 text-xs">حركة العين</div>
+                              <div className="text-white font-semibold">
+                                {((latestAnalysis.eyeData.eyeLookDown + latestAnalysis.eyeData.eyeLookUp) / 2 * 100).toFixed(1)}%
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Expression Details */}
+                        <div className="bg-white/5 rounded-xl p-4">
+                          <div className="flex items-center gap-2 mb-3">
+                            <TrendingUp className="w-5 h-5 text-blue-400" />
+                            <h3 className="text-lg font-bold">مؤشرات التعبير</h3>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2 text-xs">
+                            <div className="flex justify-between p-2 bg-white/5 rounded">
+                              <span className="text-slate-400">ابتسامة:</span>
+                              <span className="text-white">{(latestAnalysis.expressionData.mouthSmile * 100).toFixed(0)}%</span>
+                            </div>
+                            <div className="flex justify-between p-2 bg-white/5 rounded">
+                              <span className="text-slate-400">عبوس:</span>
+                              <span className="text-white">{(latestAnalysis.expressionData.mouthFrown * 100).toFixed(0)}%</span>
+                            </div>
+                            <div className="flex justify-between p-2 bg-white/5 rounded">
+                              <span className="text-slate-400">تجعد الجبين:</span>
+                              <span className="text-white">{(latestAnalysis.expressionData.browFurrow * 100).toFixed(0)}%</span>
+                            </div>
+                            <div className="flex justify-between p-2 bg-white/5 rounded">
+                              <span className="text-slate-400">فتح الفم:</span>
+                              <span className="text-white">{(latestAnalysis.expressionData.jawOpen * 100).toFixed(0)}%</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Alert for High Stress */}
+                        {latestAnalysis.stressScore > 0.7 && (
+                          <div className="bg-red-600/20 border border-red-500/30 rounded-xl p-3 flex items-start gap-3">
+                            <AlertTriangle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
+                            <div>
+                              <div className="text-red-400 font-semibold mb-1">تنبيه: مستوى توتر مرتفع</div>
+                              <div className="text-slate-300 text-xs">
+                                تم رصد مؤشرات توتر عالية. قد تحتاج إلى إعادة تقييم السؤال أو أخذ استراحة.
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

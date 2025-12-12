@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { X, AlertTriangle, CheckCircle, TrendingUp, FileText, Smile, Shield } from 'lucide-react';
+import { X, AlertTriangle, CheckCircle, FileText, Smile, Shield } from 'lucide-react';
 
 interface AnalysisReportProps {
   sessionId: string;
@@ -16,11 +16,24 @@ interface Analysis {
 }
 
 interface VideoAnalysis {
+  finalResult?: {
+    credibilityScore: number;
+    status: string;
+    statusAr: string;
+    summary: string;
+  };
   sessionId: string;
   sessionName: string;
   recordingDate: string;
-  videoFile: string;
+  videoFile?: string;
   totalFrames: number;
+  narrative?: {
+    summary: string;
+    keyMoments?: Array<{
+      timeLabel: string;
+      description: string;
+    }>;
+  };
   summary: {
     averageStressScore: number;
     maxStressScore: number;
@@ -105,18 +118,6 @@ export default function AnalysisReport({ sessionId, onClose }: AnalysisReportPro
     }
   };
 
-  const getScoreColor = (score: number) => {
-    if (score >= 0.7) return 'text-green-400';
-    if (score >= 0.4) return 'text-yellow-400';
-    return 'text-red-400';
-  };
-
-  const getScoreLabel = (score: number) => {
-    if (score >= 0.7) return 'مرتفع';
-    if (score >= 0.4) return 'متوسط';
-    return 'منخفض';
-  };
-
   return (
     <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4" style={{ fontFamily: 'Cairo, sans-serif' }}>
       <div className="bg-slate-900 border border-white/10 rounded-2xl max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col shadow-2xl">
@@ -167,6 +168,71 @@ export default function AnalysisReport({ sessionId, onClose }: AnalysisReportPro
                       تحليل الفيديو
                     </h2>
                   </div>
+
+                  {/* Final Result - Simplified JSON Summary */}
+                  {videoAnalysis.finalResult && (
+                    <div className="bg-gradient-to-br from-blue-600/30 via-cyan-600/20 to-blue-600/30 border-2 border-blue-500/40 rounded-xl p-6 mb-6 shadow-lg">
+                      <div className="flex items-center justify-between mb-4">
+                        <div className="flex items-center gap-3">
+                          <CheckCircle className={`w-8 h-8 ${
+                            videoAnalysis.finalResult.credibilityScore >= 70 ? 'text-green-400' :
+                            videoAnalysis.finalResult.credibilityScore >= 40 ? 'text-yellow-400' :
+                            'text-red-400'
+                          }`} />
+                          <div>
+                            <h3 className="text-2xl font-bold text-white">النتيجة النهائية</h3>
+                            <p className="text-sm text-slate-300 mt-1">ملخص شامل لجميع المؤشرات</p>
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <div className={`text-5xl font-bold ${
+                            videoAnalysis.finalResult.credibilityScore >= 70 ? 'text-green-400' :
+                            videoAnalysis.finalResult.credibilityScore >= 40 ? 'text-yellow-400' :
+                            'text-red-400'
+                          }`}>
+                            {videoAnalysis.finalResult.credibilityScore}
+                          </div>
+                          <div className="text-slate-400 text-sm">من 100</div>
+                        </div>
+                      </div>
+                      
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between p-4 bg-white/10 rounded-lg">
+                          <span className="text-slate-300 font-semibold">الحالة:</span>
+                          <span className={`text-lg font-bold ${
+                            videoAnalysis.finalResult.status === 'high' ? 'text-green-400' :
+                            videoAnalysis.finalResult.status === 'medium' ? 'text-yellow-400' :
+                            'text-red-400'
+                          }`}>
+                            {videoAnalysis.finalResult.statusAr}
+                          </span>
+                        </div>
+                        
+                        <div className="p-4 bg-white/5 rounded-lg border border-white/10">
+                          <div className="text-slate-400 text-sm mb-2">الملخص:</div>
+                          <div className="text-white text-lg font-semibold">
+                            {videoAnalysis.finalResult.summary}
+                          </div>
+                        </div>
+
+                        {/* Progress Bar */}
+                        <div className="mt-4">
+                          <div className="w-full h-3 bg-slate-700 rounded-full overflow-hidden">
+                            <div 
+                              className={`h-full transition-all duration-500 ${
+                                videoAnalysis.finalResult.credibilityScore >= 70 
+                                  ? 'bg-gradient-to-r from-green-500 to-green-600' :
+                                videoAnalysis.finalResult.credibilityScore >= 40 
+                                  ? 'bg-gradient-to-r from-yellow-500 to-orange-500' :
+                                  'bg-gradient-to-r from-red-500 to-red-600'
+                              }`}
+                              style={{ width: `${videoAnalysis.finalResult.credibilityScore}%` }}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
                   {/* Expression Analysis */}
                   {(videoAnalysis.expression.last || videoAnalysis.expression.average) && (
@@ -274,29 +340,54 @@ export default function AnalysisReport({ sessionId, onClose }: AnalysisReportPro
                     </div>
                   )}
 
-                  {/* Stress Score Summary */}
-                  {videoAnalysis.summary && (
-                    <div className="bg-white/5 rounded-xl p-6">
-                      <h3 className="text-lg font-bold mb-3">مؤشر التوتر</h3>
-                      <div className="space-y-2">
-                        <div className="flex justify-between">
-                          <span className="text-slate-400">المتوسط:</span>
-                          <span className="text-white font-semibold">
-                            {(videoAnalysis.summary.averageStressScore * 100).toFixed(1)}%
-                          </span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-slate-400">الحد الأقصى:</span>
-                          <span className="text-red-400 font-semibold">
-                            {(videoAnalysis.summary.maxStressScore * 100).toFixed(1)}%
-                          </span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-slate-400">الحد الأدنى:</span>
-                          <span className="text-green-400 font-semibold">
-                            {(videoAnalysis.summary.minStressScore * 100).toFixed(1)}%
-                          </span>
-                        </div>
+                  {/* Stress Score & Narrative Summary */}
+                  {(videoAnalysis.summary || videoAnalysis.narrative) && (
+                    <div className="grid md:grid-cols-2 gap-4">
+
+                      <div className="bg-gradient-to-br from-slate-800/80 to-slate-900 border border-white/5 rounded-xl p-6 shadow-inner">
+                        <h3 className="text-lg font-bold mb-3 flex items-center gap-2">
+                          <FileText className="w-5 h-5 text-cyan-400" />
+                          ملخص الفيديو
+                        </h3>
+
+                        {videoAnalysis.narrative?.summary ? (
+                          <div className="space-y-4">
+                            <p className="text-slate-200 leading-relaxed">
+                              {videoAnalysis.narrative.summary}
+                            </p>
+
+                            {videoAnalysis.narrative.keyMoments && videoAnalysis.narrative.keyMoments.length > 0 && (
+                              <div className="space-y-2">
+                                <div className="text-sm text-slate-400">أبرز اللحظات</div>
+                                <div className="space-y-2">
+                                  {videoAnalysis.narrative.keyMoments.map((moment, idx) => (
+                                    <div key={idx} className="flex items-start gap-3 bg-white/5 rounded-lg p-3">
+                                      <span className="px-2 py-1 text-xs font-semibold bg-cyan-500/20 text-cyan-200 rounded-md">
+                                        {moment.timeLabel}
+                                      </span>
+                                      <p className="text-slate-200">{moment.description}</p>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="space-y-3">
+                            <p className="text-slate-400 text-sm">
+                              سيظهر هنا ملخص تلقائي لأحداث الفيديو مع أبرز اللحظات والتغيرات في الحالة الشعورية بعد دمج نموذج التلخيص.
+                            </p>
+                            <div className="text-slate-500 text-xs leading-relaxed bg-white/5 rounded-lg p-3 border border-white/5">
+                              مثال متوقع:
+                              <br />
+                              • بداية هادئة مع نبرة صوت مستقرة.
+                              <br />
+                              • ارتفاع في التوتر عند الدقيقة 01:20 أثناء الإجابة عن سؤال حساس.
+                              <br />
+                              • عودة تدريجية للهدوء مع تحسن تعابير الوجه في نهاية المقابلة.
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </div>
                   )}
