@@ -28,7 +28,7 @@ export default function SessionPage() {
   const [loading, setLoading] = useState(true);
   const [cameraActive, setCameraActive] = useState(false);
   const [showReport, setShowReport] = useState(false);
-  const [activeTab, setActiveTab] = useState<'questions' | 'analysis'>('questions');
+  const [activeTab, setActiveTab] = useState<'questions' | 'analysis'>('analysis');
   const [latestAnalysis, setLatestAnalysis] = useState<{
     eyeData: { leftEyeBlink: number; rightEyeBlink: number; eyeLookDown: number; eyeLookUp: number };
     expressionData: { mouthSmile: number; mouthFrown: number; browFurrow: number; jawOpen: number };
@@ -108,7 +108,7 @@ export default function SessionPage() {
     try {
       recordedChunksRef.current = [];
       const mediaRecorder = new MediaRecorder(stream, {
-        mimeType: 'video/webm;codecs=vp8,opus'
+        mimeType: 'video/mp4;codecs=vp8,opus'
       });
 
       mediaRecorder.ondataavailable = (event) => {
@@ -155,9 +155,18 @@ export default function SessionPage() {
     }
 
     try {
-      const blob = new Blob(recordedChunksRef.current, { type: 'video/webm' });
+      // Detect the actual MIME type from MediaRecorder
+      const mimeType = mediaRecorderRef.current?.mimeType || 'video/mp4';
+      const blob = new Blob(recordedChunksRef.current, { type: mimeType });
+      
+      // Determine file extension based on MIME type
+      let extension = '.mp4';
+      if (mimeType.includes('mp4') || mimeType.includes('x-m4v')) {
+        extension = '.mp4';
+      }
+      
       const timestamp = Date.now();
-      const videoFilename = `session-${id}-${timestamp}.webm`;
+      const videoFilename = `session-${id}-${timestamp}${extension}`;
       const fileSizeMB = (blob.size / 1024 / 1024).toFixed(2);
       
       // Calculate averages and get last predictions for expression and authenticity
@@ -308,8 +317,10 @@ export default function SessionPage() {
           const videoHandle = await window.showSaveFilePicker({
             suggestedName: videoFilename,
             types: [{
-              description: 'WebM Video',
-              accept: { 'video/webm': ['.webm'] }
+              description: 'Video File',
+              accept: { 
+                'video/mp4': ['.mp4']
+              }
             }]
           });
           
@@ -318,7 +329,14 @@ export default function SessionPage() {
           await videoWritable.close();
           
           console.log(`Video saved: ${videoHandle.name} (${fileSizeMB} MB)`);
-          alert(`تم حفظ الفيديو بنجاح!\n\nالفيديو: ${videoHandle.name}\nالحجم: ${fileSizeMB} MB\n\nإجمالي إطارات التحليل: ${analysisDataRef.current.length}\n\nسيتم حفظ بيانات التحليل تلقائياً في التقرير`);
+          
+          alert(`تم حفظ الفيديو بنجاح!\n\nالفيديو: ${videoHandle.name}\nالحجم: ${fileSizeMB} MB\n\nإجمالي إطارات التحليل: ${analysisDataRef.current.length}\n\nجاري استخراج الصوت وتحويله إلى نص...`);
+          
+          // Start transcription after video is saved and camera is stopped
+          // Run transcription in background (don't await to avoid blocking)
+          transcribeVideo(blob, videoHandle.name).catch(err => {
+            console.error('Transcription error:', err);
+          });
         } catch (fsError: unknown) {
           // User cancelled or error, fall back to download
           const error = fsError as { name?: string };
@@ -359,6 +377,95 @@ export default function SessionPage() {
     }
   };
 
+  const transcribeVideo = async (videoBlob: Blob, videoFilename: string) => {
+    try {
+      console.log('Starting audio extraction and transcription...');
+      console.log(`Video file: ${videoFilename}, Size: ${(videoBlob.size / 1024 / 1024).toFixed(2)} MB`);
+      
+      const formData = new FormData();
+      formData.append('video', videoBlob, videoFilename);
+      
+      const apiPort = import.meta.env.VITE_MODEL_API_PORT || '5001';
+      console.log(`Sending video to transcription API at http://localhost:${apiPort}/transcribe`);
+      
+      const response = await fetch(`http://localhost:${apiPort}/transcribe`, {
+        method: 'POST',
+        body: formData
+      });
+      
+      if (response.ok) {
+        const result = await response.json();
+        const transcription = result.transcription;
+        
+        if (!transcription || transcription.trim().length === 0) {
+          console.warn('Transcription is empty');
+          alert('تم استخراج الصوت ولكن النص فارغ. قد لا يحتوي الفيديو على صوت.');
+          return;
+        }
+        
+        console.log('Transcription completed, saving text file...');
+        
+        // Save transcription as .txt file (support both .webm and .mp4)
+        const txtFilename = videoFilename.replace(/\.(mp4)$/i, '.txt');
+        const txtBlob = new Blob([transcription], { type: 'text/plain;charset=utf-8' });
+        
+        if ('showSaveFilePicker' in window) {
+          try {
+            // @ts-expect-error - File System Access API
+            const txtHandle = await window.showSaveFilePicker({
+              suggestedName: txtFilename,
+              types: [{
+                description: 'Text File',
+                accept: { 'text/plain': ['.txt'] }
+              }]
+            });
+            
+            const txtWritable = await txtHandle.createWritable();
+            await txtWritable.write(txtBlob);
+            await txtWritable.close();
+            
+            console.log(`Transcription saved: ${txtHandle.name}`);
+            alert(`تم استخراج الصوت وتحويله إلى نص بنجاح!\n\nملف النص: ${txtHandle.name}`);
+          } catch (fsError: unknown) {
+            const error = fsError as { name?: string };
+            if (error.name !== 'AbortError') {
+              // Fallback to download
+              const txtUrl = URL.createObjectURL(txtBlob);
+              const txtLink = document.createElement('a');
+              txtLink.href = txtUrl;
+              txtLink.download = txtFilename;
+              document.body.appendChild(txtLink);
+              txtLink.click();
+              document.body.removeChild(txtLink);
+              URL.revokeObjectURL(txtUrl);
+              console.log(`Transcription downloaded: ${txtFilename}`);
+              alert(`تم تحميل ملف النص: ${txtFilename}`);
+            }
+          }
+        } else {
+          // Fallback to download
+          const txtUrl = URL.createObjectURL(txtBlob);
+          const txtLink = document.createElement('a');
+          txtLink.href = txtUrl;
+          txtLink.download = txtFilename;
+          document.body.appendChild(txtLink);
+          txtLink.click();
+          document.body.removeChild(txtLink);
+          URL.revokeObjectURL(txtUrl);
+          console.log(`Transcription downloaded: ${txtFilename}`);
+          alert(`تم تحميل ملف النص: ${txtFilename}`);
+        }
+      } else {
+        const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+        console.warn('Transcription failed:', error);
+        alert(`فشل تحويل الصوت إلى نص: ${error.error || 'خطأ غير معروف'}\n\nتأكد من تشغيل خادم Python API (model_api.py)`);
+      }
+    } catch (error) {
+      console.error('Error transcribing video:', error);
+      alert('حدث خطأ أثناء تحويل الصوت إلى نص: ' + (error instanceof Error ? error.message : String(error)) + '\n\nتأكد من تشغيل خادم Python API (model_api.py)');
+    }
+  };
+
   const saveAsDownload = (videoBlob: Blob, videoFilename: string, fileSizeMB: string) => {
     // Download video only (no JSON file)
     const videoUrl = URL.createObjectURL(videoBlob);
@@ -371,13 +478,21 @@ export default function SessionPage() {
     URL.revokeObjectURL(videoUrl);
     
     console.log(`Video downloaded: ${videoFilename} (${fileSizeMB} MB)`);
-    alert(`تم حفظ الفيديو بنجاح!\n\nالفيديو: ${videoFilename}\nالحجم: ${fileSizeMB} MB\n\nسيتم حفظ بيانات التحليل تلقائياً في التقرير`);
+    
+    alert(`تم حفظ الفيديو بنجاح!\n\nالفيديو: ${videoFilename}\nالحجم: ${fileSizeMB} MB\n\nجاري استخراج الصوت وتحويله إلى نص...`);
+    
+    // Start transcription after video is downloaded (non-blocking)
+    transcribeVideo(videoBlob, videoFilename).catch(err => {
+      console.error('Transcription error:', err);
+    });
   };
 
   const stopCamera = async () => {
-    // Stop recording first
+    // Stop recording first - this will trigger saveRecording via onstop event
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
+      // saveRecording will be called automatically via onstop event
+      // which will then trigger transcription
     }
 
     // Stop stream tracks
@@ -598,32 +713,6 @@ export default function SessionPage() {
                       </div>
                     ) : (
                       <div className="space-y-4">
-                        {/* Stress Score */}
-                        <div className="bg-gradient-to-br from-red-600/20 to-orange-600/20 border border-red-500/30 rounded-xl p-4">
-                          <div className="flex items-center justify-between mb-3">
-                            <div className="flex items-center gap-2">
-                              <Activity className="w-5 h-5 text-red-400" />
-                              <h3 className="text-lg font-bold">مؤشر التوتر</h3>
-                            </div>
-                            <span className={`text-2xl font-bold ${
-                              latestAnalysis.stressScore > 0.7 ? 'text-red-400' :
-                              latestAnalysis.stressScore > 0.4 ? 'text-yellow-400' :
-                              'text-green-400'
-                            }`}>
-                              {(latestAnalysis.stressScore * 100).toFixed(1)}%
-                            </span>
-                          </div>
-                          <div className="w-full h-2 bg-slate-700 rounded-full overflow-hidden">
-                            <div 
-                              className={`h-full transition-all duration-1000 ease-out ${
-                                latestAnalysis.stressScore > 0.7 ? 'bg-gradient-to-r from-red-500 to-red-600' :
-                                latestAnalysis.stressScore > 0.4 ? 'bg-gradient-to-r from-yellow-500 to-orange-500' :
-                                'bg-gradient-to-r from-green-500 to-green-600'
-                              }`}
-                              style={{ width: `${latestAnalysis.stressScore * 100}%` }}
-                            />
-                          </div>
-                        </div>
 
                         {/* Expression Analysis */}
                         {latestAnalysis.expressionPrediction && (

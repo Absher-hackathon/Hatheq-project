@@ -9,6 +9,9 @@ import tensorflow as tf
 from tensorflow.keras.models import load_model
 import base64
 import io
+import os
+import subprocess
+import tempfile
 from PIL import Image
 
 # Note: cv2 is only used for resizing, but PIL can do that too
@@ -168,6 +171,157 @@ def predict_batch():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/transcribe', methods=['POST'])
+def transcribe():
+    """Extract audio from video and transcribe using Whisper"""
+    temp_video_path = None
+    txt_path = None
+    
+    try:
+        if 'video' not in request.files:
+            return jsonify({'error': 'No video file provided'}), 400
+        
+        video_file = request.files['video']
+        if video_file.filename == '':
+            return jsonify({'error': 'No video file selected'}), 400
+        
+        # Get script directory and stt folder path
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        stt_dir = os.path.join(script_dir, 'stt')
+        
+        # Ensure stt directory exists
+        os.makedirs(stt_dir, exist_ok=True)
+        
+        # Get video filename and extension
+        video_filename = video_file.filename or 'video.mp4'
+        video_ext = os.path.splitext(video_filename)[1] or '.mp4'  # Default to .mp4 if no extension
+        
+        # Create temporary video file with correct extension
+        temp_video = tempfile.NamedTemporaryFile(delete=False, suffix=video_ext)
+        temp_video_path = temp_video.name
+        temp_video.close()
+        
+        # Generate output text filename based on video filename
+        # Extract base name from video filename (e.g., "session-123-1234567890.webm" or "session-123-1234567890.mp4" -> "session-123-1234567890.txt")
+        base_name = os.path.splitext(video_filename)[0]
+        txt_filename = f"{base_name}.txt"
+        txt_path = os.path.join(stt_dir, txt_filename)
+        # Use absolute path to ensure correct location
+        txt_path = os.path.abspath(txt_path)
+        
+        # Save uploaded video to temp file
+        print(f"Saving video to: {temp_video_path}")
+        video_file.save(temp_video_path)
+        print(f"Video saved, size: {os.path.getsize(temp_video_path)} bytes")
+        
+        # Get path to whisper_file.py script
+        whisper_script = os.path.join(script_dir, 'stt', 'whisper_file.py')
+        
+        if not os.path.exists(whisper_script):
+            return jsonify({
+                'error': f'Whisper script not found at: {whisper_script}'
+            }), 500
+        
+        print(f"Running transcription script: {whisper_script}")
+        print(f"Input video: {temp_video_path}")
+        print(f"Output text: {txt_path}")
+        
+        # Try python3 first, fallback to python
+        python_cmd = 'python3'
+        try:
+            subprocess.run([python_cmd, '--version'], capture_output=True, check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            python_cmd = 'python'
+            try:
+                subprocess.run([python_cmd, '--version'], capture_output=True, check=True)
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                return jsonify({'error': 'Python interpreter not found'}), 500
+        
+        # Run transcription script
+        result = subprocess.run(
+            [python_cmd, whisper_script, temp_video_path, txt_path],
+            capture_output=True,
+            text=True,
+            timeout=600,  # 10 minute timeout
+            cwd=script_dir  # Set working directory
+        )
+        
+        print(f"Transcription return code: {result.returncode}")
+        if result.stdout:
+            print(f"Transcription stdout: {result.stdout}")
+        if result.stderr:
+            print(f"Transcription stderr: {result.stderr}")
+        
+        if result.returncode != 0:
+            error_msg = result.stderr if result.stderr else result.stdout
+            return jsonify({
+                'error': 'Transcription failed',
+                'details': error_msg,
+                'return_code': result.returncode
+            }), 500
+        
+        # Check if output file was created
+        abs_txt_path = os.path.abspath(txt_path)
+        if not os.path.exists(txt_path):
+            # Try to check with absolute path
+            if not os.path.exists(abs_txt_path):
+                return jsonify({
+                    'error': f'Transcription output file was not created at: {txt_path} (absolute: {abs_txt_path})',
+                    'expected_path': abs_txt_path,
+                    'stt_dir': stt_dir
+                }), 500
+            else:
+                txt_path = abs_txt_path
+        
+        # Read transcription result
+        with open(txt_path, 'r', encoding='utf-8') as f:
+            transcription = f.read().strip()
+        
+        if not transcription:
+            return jsonify({
+                'error': 'Transcription is empty - video may not contain audio'
+            }), 400
+        
+        print(f"Transcription completed, length: {len(transcription)} characters")
+        abs_txt_path = os.path.abspath(txt_path)
+        print(f"Transcription saved to: {abs_txt_path}")
+        
+        # Verify file exists and get its actual location
+        if os.path.exists(abs_txt_path):
+            actual_path = os.path.abspath(abs_txt_path)
+            file_size = os.path.getsize(actual_path)
+            print(f"Verified file exists at: {actual_path} (size: {file_size} bytes)")
+        else:
+            print(f"WARNING: File not found at expected path: {abs_txt_path}")
+        
+        return jsonify({
+            'success': True,
+            'transcription': transcription,
+            'file_path': abs_txt_path,
+            'relative_path': txt_path
+        })
+        
+    except subprocess.TimeoutExpired:
+        return jsonify({'error': 'Transcription timeout (exceeded 10 minutes)'}), 500
+    except FileNotFoundError as e:
+        return jsonify({'error': f'File not found: {str(e)}'}), 500
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"Transcription error: {error_trace}")
+        return jsonify({
+            'error': str(e),
+            'traceback': error_trace
+        }), 500
+    finally:
+        # Clean up temporary video file only (keep the txt file in stt folder)
+        if temp_video_path and os.path.exists(temp_video_path):
+            try:
+                os.unlink(temp_video_path)
+                print(f"Cleaned up temp video: {temp_video_path}")
+            except Exception as e:
+                print(f"Error cleaning up temp video: {e}")
+
 if __name__ == '__main__':
     import sys
     
@@ -188,6 +342,7 @@ if __name__ == '__main__':
     print("  GET  /health - Health check")
     print("  POST /predict - Single image prediction")
     print("  POST /predict_batch - Batch predictions")
+    print("  POST /transcribe - Extract audio and transcribe video")
     print("="*50 + "\n")
     
     app.run(host='0.0.0.0', port=port, debug=True)

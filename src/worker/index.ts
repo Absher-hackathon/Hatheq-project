@@ -47,17 +47,8 @@ app.get("/api/sessions/:id", async (c) => {
     .bind(id)
     .all();
 
-  // Get video analysis if available (stored in R2 or returned from video upload)
-  let videoAnalysis = null;
-  try {
-    const videoMetadata = await c.env.R2_BUCKET.list({ prefix: `sessions/${id}/` });
-    // Analysis would be stored separately, for now we return null
-    // The client will load it from the local JSON file
-  } catch (error) {
-    // Ignore errors, analysis might not be stored in R2
-  }
 
-  return c.json({ session, questions: questions.results, videoAnalysis });
+  return c.json({ session, questions: questions.results });
 });
 
 // Add a question and answer
@@ -232,7 +223,7 @@ app.post("/api/sessions/:id/video", async (c) => {
 
     // Generate unique filename
     const timestamp = Date.now();
-    const filename = `session-${sessionId}-${timestamp}.webm`;
+    const filename = `session-${sessionId}-${timestamp}.mp4`;
     const fileSize = videoFile.size;
     
     // Save analysis JSON to R2 if provided
@@ -283,7 +274,7 @@ app.get("/api/sessions/:id/video-analysis", async (c) => {
     }
     
     // Get the most recent analysis file
-    const latest = objects.objects.sort((a, b) => 
+    const latest = objects.objects.sort((a: { uploaded: Date }, b: { uploaded: Date }) => 
       new Date(b.uploaded).getTime() - new Date(a.uploaded).getTime()
     )[0];
     
@@ -346,6 +337,33 @@ app.get("/api/sessions/:id/video/:filename", async (c) => {
   } catch (error) {
     console.error("Error retrieving video:", error);
     return c.json({ error: "Failed to retrieve video" }, 500);
+  }
+});
+
+// Delete all data from database (WARNING: This deletes everything!)
+app.delete("/api/admin/clear-all-data", async (c) => {
+  try {
+    // Delete in order to respect foreign key constraints (if any)
+    await c.env.DB.prepare("DELETE FROM session_reports").run();
+    await c.env.DB.prepare("DELETE FROM nlp_analysis").run();
+    await c.env.DB.prepare("DELETE FROM behavioral_analysis").run();
+    await c.env.DB.prepare("DELETE FROM questions").run();
+    await c.env.DB.prepare("DELETE FROM interrogation_sessions").run();
+
+    return c.json({ 
+      success: true, 
+      message: "All data has been deleted from the database",
+      deleted_tables: [
+        "session_reports",
+        "nlp_analysis", 
+        "behavioral_analysis",
+        "questions",
+        "interrogation_sessions"
+      ]
+    });
+  } catch (error) {
+    console.error("Error clearing database:", error);
+    return c.json({ error: "Failed to clear database" }, 500);
   }
 });
 
